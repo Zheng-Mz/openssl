@@ -75,6 +75,7 @@ const (
 	TLSv1_1 SSLVersion = 0x04
 	TLSv1_2 SSLVersion = 0x05
 	DTLSv1  SSLVersion = 0x06
+	DTLSv1_2  SSLVersion = 0x07
 
 	// Make sure to disable SSLv2 and SSLv3 if you use this. SSLv3 is vulnerable
 	// to the "POODLE" attack, and SSLv2 is what, just don't even.
@@ -96,6 +97,8 @@ func NewCtxWithVersion(version SSLVersion) (*Ctx, error) {
 		method = C.X_TLSv1_2_method()
 	case DTLSv1:
 		method = C.X_DTLSv1_method()
+	case DTLSv1_2:
+		method = C.X_DTLSv1_2_method()
 	case AnyVersion:
 		method = C.X_SSLv23_method()
 	}

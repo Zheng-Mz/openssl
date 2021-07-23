@@ -475,6 +475,10 @@ const SSL_METHOD *X_DTLSv1_method() {
     return DTLS_server_method();
 }
 
+const SSL_METHOD *X_DTLSv1_2_method() {
+    return DTLS_method();
+}
+
 int X_SSL_CTX_new_index() {
 	return SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, NULL);
 }
