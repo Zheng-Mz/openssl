@@ -35,7 +35,7 @@ func ServerListenAndServeTLS(srv *http.Server,
 		addr = ":https"
 	}
 
-	ctx, err := NewCtxFromFiles(cert_file, key_file)
+	ctx, err := NewCtxFromFiles(cert_file, key_file, AnyVersion)
 	if err != nil {
 		return err
 	}

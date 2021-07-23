@@ -20,14 +20,13 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"github.com/spacemonkeygo/spacelog"
 	"io/ioutil"
 	"os"
 	"runtime"
 	"sync"
 	"time"
 	"unsafe"
-
-	"github.com/spacemonkeygo/spacelog"
 )
 
 var (
@@ -75,10 +74,11 @@ const (
 	TLSv1   SSLVersion = 0x03
 	TLSv1_1 SSLVersion = 0x04
 	TLSv1_2 SSLVersion = 0x05
+	DTLSv1  SSLVersion = 0x06
 
 	// Make sure to disable SSLv2 and SSLv3 if you use this. SSLv3 is vulnerable
 	// to the "POODLE" attack, and SSLv2 is what, just don't even.
-	AnyVersion SSLVersion = 0x06
+	AnyVersion SSLVersion = 0xFF
 )
 
 // NewCtxWithVersion creates an SSL context that is specific to the provided
@@ -94,6 +94,8 @@ func NewCtxWithVersion(version SSLVersion) (*Ctx, error) {
 		method = C.X_TLSv1_1_method()
 	case TLSv1_2:
 		method = C.X_TLSv1_2_method()
+	case DTLSv1:
+		method = C.X_DTLSv1_method()
 	case AnyVersion:
 		method = C.X_SSLv23_method()
 	}
@@ -114,8 +116,8 @@ func NewCtx() (*Ctx, error) {
 
 // NewCtxFromFiles calls NewCtx, loads the provided files, and configures the
 // context to use them.
-func NewCtxFromFiles(cert_file string, key_file string) (*Ctx, error) {
-	ctx, err := NewCtx()
+func NewCtxFromFiles(cert_file string, key_file string, version SSLVersion) (*Ctx, error) {
+	ctx, err := NewCtxWithVersion(version)
 	if err != nil {
 		return nil, err
 	}
@@ -482,6 +484,10 @@ func (c *Ctx) SetVerifyDepth(depth int) {
 // https://www.openssl.org/docs/ssl/SSL_CTX_set_verify.html
 func (c *Ctx) GetVerifyDepth() int {
 	return int(C.SSL_CTX_get_verify_depth(c.ctx))
+}
+
+func (c *Ctx) SetReadAhead(yes int) int {
+	return int(C.X_SSL_CTX_set_read_ahead(c.ctx, C.int(yes)))
 }
 
 type TLSExtServernameCallback func(ssl *SSL) SSLTLSExtErr

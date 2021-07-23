@@ -93,7 +93,7 @@ import (
 	"strings"
 )
 
-func init() {
+func Init() {
 	if rc := C.X_shim_init(); rc != 0 {
 		panic(fmt.Errorf("X_shim_init failed with %d", rc))
 	}

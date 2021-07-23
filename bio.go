@@ -28,6 +28,35 @@ import (
 const (
 	SSLRecordSize = 16 * 1024
 )
+const (
+	BIO_CTRL_DGRAM_SCTP_SET_IN_HANDSHAKE    =50
+	BIO_CTRL_DGRAM_SCTP_ADD_AUTH_KEY        =51
+	BIO_CTRL_DGRAM_SCTP_NEXT_AUTH_KEY       =52
+	BIO_CTRL_DGRAM_SCTP_AUTH_CCS_RCVD       =53
+	BIO_CTRL_DGRAM_SCTP_GET_SNDINFO     =60
+	BIO_CTRL_DGRAM_SCTP_SET_SNDINFO     =61
+	BIO_CTRL_DGRAM_SCTP_GET_RCVINFO     =62
+	BIO_CTRL_DGRAM_SCTP_SET_RCVINFO     =63
+	BIO_CTRL_DGRAM_SCTP_GET_PRINFO          =64
+	BIO_CTRL_DGRAM_SCTP_SET_PRINFO          =65
+	BIO_CTRL_DGRAM_SCTP_SAVE_SHUTDOWN       =70
+
+)
+type BioDgramSctpSndinfo struct {
+	SndSid uint16
+	SndFlag uint16
+	SndPPID uint32
+	SndCtxt uint32
+}
+type BioDgramSctpRcvinfo struct {
+	RcvSid uint16
+	RcvSSN uint16
+	RcvFlag uint16
+	RcvPPID uint32
+	RcvTSN uint32
+	RcvCumTSN uint32
+	RcvCtxt uint32
+}
 
 func nonCopyGoBytes(ptr uintptr, length int) []byte {
 	var slice []byte
@@ -49,6 +78,14 @@ type writeBio struct {
 	op_mtx          sync.Mutex
 	buf             []byte
 	release_buffers bool
+}
+
+/********************************************/
+/* Types added as part of DTLS-SCTP support */
+/********************************************/
+
+type Bio struct{
+	bio *C.BIO
 }
 
 func loadWritePtr(b *C.BIO) *writeBio {
@@ -302,4 +339,33 @@ func (b *anyBio) Write(buf []byte) (written int, err error) {
 		return n, errors.New("BIO write failed")
 	}
 	return n, nil
+}
+
+/**********************************************/
+/* Methods Added as part of DTLS-SCTP support */
+/**********************************************/
+
+func NewBioDgramSctp(ssl *SSL,fd int,closeFlag int) (b *Bio){
+	b = &Bio{}
+	b.bio = C.X_BIO_new_dgram_sctp(C.int(fd),C.int(closeFlag))
+	setSSLBio(ssl,b,b)
+	return
+}
+
+func setSSLBio(ssl *SSL,rBio *Bio,wBio *Bio){
+	C.SSL_set_bio(ssl.ssl, rBio.bio, wBio.bio)
+}
+func BioCtrlSetSCTPSndInfo(b *Bio,sndinfo *BioDgramSctpSndinfo){
+	C.BIO_ctrl(b.bio, BIO_CTRL_DGRAM_SCTP_SET_SNDINFO, C.long((unsafe.Sizeof(BioDgramSctpSndinfo{}))), unsafe.Pointer(sndinfo));
+}
+
+func BioCtrlGetSCTPRcvInfo(b *Bio,rcvinfo *BioDgramSctpRcvinfo){
+	C.BIO_ctrl(b.bio,BIO_CTRL_DGRAM_SCTP_GET_RCVINFO, C.long((unsafe.Sizeof(BioDgramSctpRcvinfo{}))), unsafe.Pointer(rcvinfo));
+}
+type HandleNotification func (bio *C.BIO,context unsafe.Pointer,buf unsafe.Pointer)
+
+func BIODgramSctpNotificationCb( b *Bio, handlerFn HandleNotification,sslContext *SSL) (rspcode int){
+
+	retVal:= C.X_BIO_dgram_sctp_notification_cb(b.bio,sslContext.ssl,(*[0]byte)(unsafe.Pointer(&handlerFn)))
+	return int(retVal)
 }

@@ -39,7 +39,7 @@ var (
 
 type Conn struct {
 	*SSL
-
+    Fd               int
 	conn             net.Conn
 	ctx              *Ctx // for gc
 	into_ssl         *readBio
@@ -617,4 +617,30 @@ func (c *Conn) setSession(session []byte) error {
 		return fmt.Errorf("unable to set session: %s", errorFromErrorQueue())
 	}
 	return nil
+}
+
+/*****************************************************/
+/* Method/Wrapper added as part of DTLS-SCTP support */
+/*****************************************************/
+func DtlsSctpAccept(conn net.Conn, ctx *Ctx, ssl *SSL, fd int, closeFlag int) (c *Conn, bio *Bio, err error) {
+
+	bio = NewBioDgramSctp(ssl, fd, closeFlag)
+	c = &Conn{
+		SSL:      ssl,
+		conn:     conn,
+		ctx:      ctx,
+		into_ssl: &readBio{},
+		from_ssl: &writeBio{},
+	}
+	// TODO check to make sure this call is blocking (if bio is set to block)
+	// ensure that the dtls handshake is completed before this function returns
+	C.SSL_set_accept_state(c.ssl)
+	rc := C.SSL_accept(c.ssl)
+	if rc != 1 {
+		rc = C.SSL_get_error(c.ssl, C.int(rc))
+		//C.ERR_error_string_n(unsigned long e, char *buf, size_t len);
+		err = fmt.Errorf("SSL_accept failed; err code: %d", rc)
+		return nil, nil, err
+	}
+	return c, bio, nil
 }

@@ -168,3 +168,21 @@ func sni_cb_thunk(p unsafe.Pointer, con *C.SSL, ad unsafe.Pointer, arg unsafe.Po
 	// Note: this is ctx.sni_cb, not C.sni_cb
 	return C.int(sni_cb(s))
 }
+
+/*****************************************************/
+/* Method/Wrapper added as part of DTLS-SCTP support */
+/*****************************************************/
+
+func NewSSL(ctxt *Ctx) (ssl *SSL,err error) {
+	ssl=&SSL{}
+	retSSL,err :=newSSL(ctxt.ctx)
+	if err !=nil{
+		return nil,err
+	}
+	ssl.ssl=retSSL
+	return ssl,err
+}
+
+func GetSSLShutdown(ssl *SSL)(status int){
+	return int(C.SSL_get_shutdown(ssl.ssl))
+}

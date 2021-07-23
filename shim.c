@@ -471,6 +471,10 @@ const SSL_METHOD *X_TLSv1_2_method() {
 #endif
 }
 
+const SSL_METHOD *X_DTLSv1_method() {
+    return DTLS_server_method();
+}
+
 int X_SSL_CTX_new_index() {
 	return SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, NULL);
 }
@@ -560,6 +564,10 @@ int X_SSL_CTX_ticket_key_cb(SSL *s, unsigned char key_name[16],
 	void* p = SSL_CTX_get_ex_data(ssl_ctx, get_ssl_ctx_idx());
 	// get the pointer to the go Ctx object and pass it back into the thunk
 	return go_ticket_key_cb_thunk(p, s, key_name, iv, cctx, hctx, enc);
+}
+
+int X_SSL_CTX_set_read_ahead(SSL_CTX *ssl_ctx, int yes) {
+    return SSL_CTX_set_read_ahead(ssl_ctx, yes);
 }
 
 int X_BIO_get_flags(BIO *b) {
@@ -768,3 +776,16 @@ long X_X509_get_version(const X509 *x) {
 int X_X509_set_version(X509 *x, long version) {
 	return X509_set_version(x, version);
 }
+
+/**********************************************/
+/* Methods Added as part of DTLS-SCTP support */
+/**********************************************/
+
+BIO *X_BIO_new_dgram_sctp(int fd, int close_flag){
+    return BIO_new_dgram_sctp(fd,close_flag);
+}
+
+int X_BIO_dgram_sctp_notification_cb(BIO *bio,SSL *ssl, void (*handle_notifications)(BIO *bio, void *context, void *buf) ){
+    return BIO_dgram_sctp_notification_cb(bio,handle_notifications,(void *)ssl);
+}
+

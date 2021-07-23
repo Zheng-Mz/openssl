@@ -58,6 +58,7 @@ extern const SSL_METHOD *X_SSLv3_method();
 extern const SSL_METHOD *X_TLSv1_method();
 extern const SSL_METHOD *X_TLSv1_1_method();
 extern const SSL_METHOD *X_TLSv1_2_method();
+extern const SSL_METHOD *X_DTLSv1_method();
 
 #if defined SSL_CTRL_SET_TLSEXT_HOSTNAME
 extern int sni_cb(SSL *ssl_conn, int *ad, void *arg);
@@ -76,6 +77,7 @@ extern long X_SSL_CTX_sess_set_cache_size(SSL_CTX* ctx, long t);
 extern long X_SSL_CTX_sess_get_cache_size(SSL_CTX* ctx);
 extern long X_SSL_CTX_set_timeout(SSL_CTX* ctx, long t);
 extern long X_SSL_CTX_get_timeout(SSL_CTX* ctx);
+extern int  X_SSL_CTX_set_read_ahead(SSL_CTX *ssl_ctx, int yes);
 extern long X_SSL_CTX_add_extra_chain_cert(SSL_CTX* ctx, X509 *cert);
 extern long X_SSL_CTX_set_tmp_ecdh(SSL_CTX* ctx, EC_KEY *key);
 extern long X_SSL_CTX_set_tlsext_servername_callback(SSL_CTX* ctx, int (*cb)(SSL *con, int *ad, void *args));
@@ -100,6 +102,12 @@ extern int X_BIO_read(BIO *b, void *buf, int len);
 extern int X_BIO_write(BIO *b, const void *buf, int len);
 extern BIO *X_BIO_new_write_bio();
 extern BIO *X_BIO_new_read_bio();
+/*BIO method added as part of DTLS-sctp*/
+extern BIO *X_BIO_new_dgram_sctp(int fd, int close_flag);
+extern int X_BIO_dgram_sctp_notification_cb(BIO *bio,SSL *ssl,void (*handle_notifications)(BIO *bio, void *context, void *buf));
+typedef void (*BIO_dgram_sctp_notification_handler_FN) (BIO *b,
+                                                        void *context,
+                                                        void *buf);
 
 /* EVP methods */
 extern const int X_ED25519_SUPPORT;
