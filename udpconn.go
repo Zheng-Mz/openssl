@@ -207,6 +207,7 @@ char* UdpDtlsListen(SSL *ssl, int fd) {
 
     //Get Peer addr: ip:port
     char addrbuf[INET6_ADDRSTRLEN];
+    char peer_addr[INET6_ADDRSTRLEN+10];
     sprintf(peer_addr, "%s:%d", inet_ntop(AF_INET, &client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN), ntohs(client_addr.s4.sin_port));
     // DEBUG
     if (1) {
@@ -227,17 +228,28 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"sync"
 	"unsafe"
+	"github.com/spacemonkeygo/openssl/utils"
 )
 
 // UdpDtlsConn .
 type UdpDtlsConn struct {
 	*SSL
-	Fd      int
-	bio     *Bio
-	Raddr   string
+	Fd               int
+	Raddr            string
+	bio              *Bio
+	conn             net.Conn
+	ctx              *Ctx // for gc
+	into_ssl         *readBio
+	from_ssl         *writeBio
+	is_shutdown      bool
+	mtx              sync.Mutex
+	want_read_future *utils.Future
 }
-
+/*
 func UdpDtlsAccept(ctx *Ctx, port uint16) (conn *UdpDtlsConn) {
 	ssl := &SSL{}
 
@@ -252,12 +264,140 @@ func UdpDtlsAccept(ctx *Ctx, port uint16) (conn *UdpDtlsConn) {
 		SSL: ssl,
 	}
 	return
+}*/
+
+func (c *UdpDtlsConn) fillInputBuffer() error {
+	for {
+		n, err := c.into_ssl.ReadFromOnce(c.conn)
+		if n == 0 && err == nil {
+			continue
+		}
+		if err == io.EOF {
+			c.into_ssl.MarkEOF()
+			return c.Close()
+		}
+		return err
+	}
+}
+
+func (c *UdpDtlsConn) flushOutputBuffer() error {
+	_, err := c.from_ssl.WriteTo(c.conn)
+	return err
+}
+
+func (c *UdpDtlsConn) getErrorHandler(rv C.int, errno error) func() error {
+	errcode := C.SSL_get_error(c.ssl, rv)
+	switch errcode {
+	case C.SSL_ERROR_ZERO_RETURN:
+		return func() error {
+			c.Close()
+			return io.ErrUnexpectedEOF
+		}
+	case C.SSL_ERROR_WANT_READ:
+		go c.flushOutputBuffer()
+		if c.want_read_future != nil {
+			want_read_future := c.want_read_future
+			return func() error {
+				_, err := want_read_future.Get()
+				return err
+			}
+		}
+		c.want_read_future = utils.NewFuture()
+		want_read_future := c.want_read_future
+		return func() (err error) {
+			defer func() {
+				c.mtx.Lock()
+				c.want_read_future = nil
+				c.mtx.Unlock()
+				want_read_future.Set(nil, err)
+			}()
+			err = c.fillInputBuffer()
+			if err != nil {
+				return err
+			}
+			return tryAgain
+		}
+	case C.SSL_ERROR_WANT_WRITE:
+		return func() error {
+			err := c.flushOutputBuffer()
+			if err != nil {
+				return err
+			}
+			return tryAgain
+		}
+	case C.SSL_ERROR_SYSCALL:
+		var err error
+		if C.ERR_peek_error() == 0 {
+			switch rv {
+			case 0:
+				err = errors.New("protocol-violating EOF")
+			case -1:
+				err = errno
+			default:
+				err = errorFromErrorQueue()
+			}
+		} else {
+			err = errorFromErrorQueue()
+		}
+		return func() error { return err }
+	default:
+		err := errorFromErrorQueue()
+		return func() error { return err }
+	}
+}
+
+func (c *UdpDtlsConn) handleError(errcb func() error) error {
+	if errcb != nil {
+		return errcb()
+	}
+	return nil
+}
+
+func (c *UdpDtlsConn) shutdownLoop() error {
+	err := tryAgain
+	shutdown_tries := 0
+	for err == tryAgain {
+		shutdown_tries = shutdown_tries + 1
+		rv, errno := C.SSL_shutdown(c.ssl)
+
+		if rv < 0 {
+			err = c.handleError(c.getErrorHandler(rv, errno))
+		} else {
+			err = nil
+		}
+
+		if err == nil {
+			return c.flushOutputBuffer()
+		}
+		if err == tryAgain && shutdown_tries >= 2 {
+			return errors.New("shutdown requested a third time?")
+		}
+	}
+	if err == io.ErrUnexpectedEOF {
+		err = nil
+	}
+	return err
+}
+
+// Close dtls conn
+func (c *UdpDtlsConn) Close() error {
+
+	c.conn.Close()
+	c.is_shutdown = true
+	var errs utils.ErrorGroup
+	errs.Add(c.shutdownLoop())
+	errs.Add(c.conn.Close())
+	return errs.Finalize()
 }
 
 func (c *UdpDtlsConn) Read(b []byte) (n int, err error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+
 	rv, _ := C.SSL_read(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
 	if rv <=  0 {
-		return rv, errors.New("Failed to SSL_read")
+		return int(rv), errors.New("Failed to SSL_read")
 	}
 	return int(rv), nil
 }
@@ -265,7 +405,7 @@ func (c *UdpDtlsConn) Read(b []byte) (n int, err error) {
 func (c *UdpDtlsConn) Write(b []byte) (n int, err error) {
 	rv, _ := C.SSL_write(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
 	if rv <=  0 {
-		return rv, errors.New("Failed to SSL_write")
+		return int(rv), errors.New("Failed to SSL_write")
 	}
 	return int(rv), nil
 }
@@ -278,7 +418,8 @@ func UdpDtlstest(cert, key string) (err error) {
 	}
 
 	C.UpdateUdpDtlsCtxBaseCfg(ctx.ctx)
-	ctx.SetVerify(VerifyPeer|VerifyFailIfNoPeerCert, nil)
+	//ctx.SetVerify(VerifyPeer|VerifyFailIfNoPeerCert, nil)
+	ctx.SetVerify(VerifyNone, nil)
 	ctx.SetReadAhead(1)
 
 	//Todo: tbd
@@ -297,20 +438,25 @@ func UdpDtlstest(cert, key string) (err error) {
 		bio := NewBioDgramUdp(ssl, int(fd), 0)
 		C.BioCtrlForUdpDtls(bio.bio, 5)
 
-		raddr := C.UdpDtlsListen(ssl.ssl)
+		raddr := C.UdpDtlsListen(ssl.ssl, fd)
 
 		conn := &UdpDtlsConn{
 			SSL: ssl,
 			Fd: int(fd),
 			bio: bio,
+			ctx: ctx,
 			Raddr: C.GoString(raddr),
+			into_ssl: &readBio{},
+			from_ssl: &writeBio{},
 		}
 
 		go func() {
+			//
+			C.SSL_set_accept_state(conn.ssl)
 			var res int = 0
 			for(res <= 0) {
 				// TODO: optimize
-				res = C.SSL_accept(conn.ssl)
+				res = int(C.SSL_accept(conn.ssl))
 			}
 			C.BioCtrlForUdpDtls(bio.bio, 5)
 
