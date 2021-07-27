@@ -377,6 +377,7 @@ const (
 	CipherServerPreference             Options = C.SSL_OP_CIPHER_SERVER_PREFERENCE
 	NoSessionResumptionOrRenegotiation Options = C.SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION
 	NoTicket                           Options = C.SSL_OP_NO_TICKET
+	CookieExchange                     Options = C.SSL_OP_COOKIE_EXCHANGE
 )
 
 // SetOptions sets context options. See

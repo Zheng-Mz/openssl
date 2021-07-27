@@ -793,3 +793,11 @@ int X_BIO_dgram_sctp_notification_cb(BIO *bio,SSL *ssl, void (*handle_notificati
     return BIO_dgram_sctp_notification_cb(bio,handle_notifications,(void *)ssl);
 }
 
+
+/**********************************************/
+/* Methods Added as part of DTLS-UDP support */
+/**********************************************/
+
+BIO *X_BIO_new_dgram(int fd, int close_flag) {
+    return BIO_new_dgram(fd, close_flag);
+}

@@ -109,6 +109,8 @@ extern int X_BIO_dgram_sctp_notification_cb(BIO *bio,SSL *ssl,void (*handle_noti
 typedef void (*BIO_dgram_sctp_notification_handler_FN) (BIO *b,
                                                         void *context,
                                                         void *buf);
+/*BIO method added as part of DTLS-udp*/
+extern BIO *X_BIO_new_dgram(int fd, int close_flag);
 
 /* EVP methods */
 extern const int X_ED25519_SUPPORT;

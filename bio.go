@@ -29,6 +29,17 @@ const (
 	SSLRecordSize = 16 * 1024
 )
 const (
+	//DGRAM
+	BIO_CTRL_DGRAM_CONNECT           = 31
+	BIO_CTRL_DGRAM_SET_CONNECTED     = 32
+	BIO_CTRL_DGRAM_SET_RECV_TIMEOUT  = 33
+	BIO_CTRL_DGRAM_GET_RECV_TIMEOUT  = 34
+	BIO_CTRL_DGRAM_SET_SEND_TIMEOUT  = 35
+	BIO_CTRL_DGRAM_GET_SEND_TIMEOUT  = 36
+	BIO_CTRL_DGRAM_GET_RECV_TIMER_EXP = 37
+	BIO_CTRL_DGRAM_GET_SEND_TIMER_EXP = 38
+
+	//DGRAM_SCTP
 	BIO_CTRL_DGRAM_SCTP_SET_IN_HANDSHAKE    =50
 	BIO_CTRL_DGRAM_SCTP_ADD_AUTH_KEY        =51
 	BIO_CTRL_DGRAM_SCTP_NEXT_AUTH_KEY       =52
@@ -369,3 +380,18 @@ func BIODgramSctpNotificationCb( b *Bio, handlerFn HandleNotification,sslContext
 	retVal:= C.X_BIO_dgram_sctp_notification_cb(b.bio,sslContext.ssl,(*[0]byte)(unsafe.Pointer(&handlerFn)))
 	return int(retVal)
 }
+
+/**********************************************/
+/* Methods Added as part of DTLS-UDP support */
+/**********************************************/
+
+func NewBioDgramUdp(ssl *SSL, fd int, closeFlag int) (b *Bio) {
+	b = &Bio{}
+	b.bio = C.X_BIO_new_dgram(C.int(fd), C.int(closeFlag))
+	setSSLBio(ssl,b,b)
+	return
+}
+
+//func BioCtrlDgramSetRecvTimeout(b *Bio, rcvinfo *BioDgramSctpRcvinfo){
+//	C.BIO_ctrl(b.bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, C.long((unsafe.Sizeof(BioDgramSctpRcvinfo{}))), unsafe.Pointer(rcvinfo));
+//}
