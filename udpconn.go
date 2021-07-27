@@ -195,7 +195,7 @@ void BioCtrlForUdpDtls(BIO *bio, int recv_timeout) {
     BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
 }
 
-char* UdpDtlsListen(SSL *ssl, int fd) {
+int UdpDtlsListen(SSL *ssl, int fd, char *raddr) {
 	union {
 		struct sockaddr_storage ss;
 		struct sockaddr_in6 s6;
@@ -207,21 +207,96 @@ char* UdpDtlsListen(SSL *ssl, int fd) {
 
     //Get Peer addr: ip:port
     char addrbuf[INET6_ADDRSTRLEN];
-    char peer_addr[INET6_ADDRSTRLEN+10];
-    sprintf(peer_addr, "%s:%d", inet_ntop(AF_INET, &client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN), ntohs(client_addr.s4.sin_port));
+    sprintf(raddr, "%s:%d", inet_ntop(AF_INET, &client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN), ntohs(client_addr.s4.sin_port));
     // DEBUG
     if (1) {
-        printf ("accepted connection from %s\n", peer_addr);
+        printf ("accepted connection from %s\n", raddr);
     }
 
 	if (connect(fd, (struct sockaddr *) &client_addr, sizeof(struct sockaddr_in))) {
 		printf("Failed to connect.");
-		return NULL;
+		return -1;
 	}
+
     //BIO_set_fd(SSL_get_rbio(ssl), info.fd, BIO_NOCLOSE);
     BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &client_addr.ss);
+    return 0;
+}
 
-    return peer_addr;
+int associate_peer_info(SSL *ssl, int fd, char *raddr, unsigned int rport) {
+	union {
+		struct sockaddr_storage ss;
+		struct sockaddr_in s4;
+		struct sockaddr_in6 s6;
+	} remote_addr;
+
+	if (inet_pton(AF_INET, raddr, &remote_addr.s4.sin_addr) == 1) {
+		remote_addr.s4.sin_family = AF_INET;
+		//remote_addr.s4.sin_len = sizeof(struct sockaddr_in);
+		remote_addr.s4.sin_port = htons(rport);
+	} else if (inet_pton(AF_INET6, raddr, &remote_addr.s6.sin6_addr) == 1) {
+		remote_addr.s6.sin6_family = AF_INET6;
+		//remote_addr.s6.sin6_len = sizeof(struct sockaddr_in6);
+		remote_addr.s6.sin6_port = htons(rport);
+	} else {
+		return -1;
+	}
+
+    //bind peer ip:port
+	if (remote_addr.ss.ss_family == AF_INET) {
+		if (connect(fd, (struct sockaddr *) &remote_addr, sizeof(struct sockaddr_in))) {
+            printf("Failed to connect.");
+		    return -2;
+		}
+	} else {
+		if (connect(fd, (struct sockaddr *) &remote_addr, sizeof(struct sockaddr_in6))) {
+            printf("Failed to connect.");
+		    return -3;
+		}
+	}
+    BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &remote_addr.ss);
+
+    int retval = SSL_connect(ssl);
+	if (retval <= 0) {
+		switch (SSL_get_error(ssl, retval)) {
+			case SSL_ERROR_ZERO_RETURN:
+				printf("SSL_connect failed with SSL_ERROR_ZERO_RETURN\n");
+				break;
+			case SSL_ERROR_WANT_READ:
+				printf("SSL_connect failed with SSL_ERROR_WANT_READ\n");
+				break;
+			case SSL_ERROR_WANT_WRITE:
+				printf("SSL_connect failed with SSL_ERROR_WANT_WRITE\n");
+				break;
+			case SSL_ERROR_WANT_CONNECT:
+				printf("SSL_connect failed with SSL_ERROR_WANT_CONNECT\n");
+				break;
+			case SSL_ERROR_WANT_ACCEPT:
+				printf("SSL_connect failed with SSL_ERROR_WANT_ACCEPT\n");
+				break;
+			case SSL_ERROR_WANT_X509_LOOKUP:
+				printf("SSL_connect failed with SSL_ERROR_WANT_X509_LOOKUP\n");
+				break;
+			case SSL_ERROR_SYSCALL:
+				printf("SSL_connect failed with SSL_ERROR_SYSCALL\n");
+				break;
+			case SSL_ERROR_SSL:
+				printf("SSL_connect failed with SSL_ERROR_SSL\n");
+				break;
+			default:
+				printf("SSL_connect failed with unknown error\n");
+				break;
+		}
+		return -4;
+    }
+
+    // Set and activate timeouts
+    struct timeval timeout;
+    timeout.tv_sec = 3;
+    timeout.tv_usec = 0;
+    BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
+
+    return 0;
 }
  */
 import "C"
@@ -240,18 +315,25 @@ type SocketConn struct {
 }
 
 func (c *SocketConn) Close() (err error) {
+	err = syscall.Close(c.fd)
 	return
 }
 
 func (c *SocketConn) Read(p []byte) (n int, err error) {
-	n , err = syscall.Read(syscall.Handle(c.fd), p)
-	fmt.Printf("conn.Read[%v], len=%d", p[:n-1], n)
+	//n , err = syscall.Read(c.fd, p)
+	//if err != nil {
+	//	err = errors.New(fmt.Sprintf("Failed ot syscall.Read, Err: %v", err))
+	//	return
+	//}
 	return
 }
 
 func (c *SocketConn) Write(p []byte) (n int, err error) {
-	n , err = syscall.Write(syscall.Handle(c.fd), p)
-	fmt.Printf("conn.Write[%v], len=%d", p[:n-1], n)
+	n , err = syscall.Write(c.fd, p)
+	if err != nil {
+		err = errors.New(fmt.Sprintf("Failed ot syscall.Write, Err: %v", err))
+		return
+	}
 	return
 }
 
@@ -269,22 +351,6 @@ type UdpDtlsConn struct {
 	mtx              sync.Mutex
 	want_read_future *utils.Future
 }
-/*
-func UdpDtlsAccept(ctx *Ctx, port uint16) (conn *UdpDtlsConn) {
-	ssl := &SSL{}
-
-	accept := C.DtlsUdpAccept(ctx.ctx, port)
-
-	raddr := make([]byte, 128)
-	ssl.ssl = C.peer_connect_handle(accept, unsafe.Pointer(&raddr[0]))
-	if ssl.ssl == nil {
-		return
-	}
-	conn = &UdpDtlsConn{
-		SSL: ssl,
-	}
-	return
-}*/
 
 func (c *UdpDtlsConn) fillInputBuffer() error {
 	for {
@@ -414,6 +480,12 @@ func (c *UdpDtlsConn) Read(b []byte) (n int, err error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
+	rv, _ := C.SSL_read(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
+	if rv > 0 {
+		return int(rv), nil
+	}
+	return 0, errors.New("Failed to SSL_read.")
+	/*
 	err = tryAgain
 	for err == tryAgain {
 		n, errcb := c.read(b)
@@ -427,6 +499,7 @@ func (c *UdpDtlsConn) Read(b []byte) (n int, err error) {
 		}
 	}
 	return 0, err
+	*/
 }
 
 func (c *UdpDtlsConn) read(b []byte) (int, func() error) {
@@ -474,6 +547,47 @@ func (c *UdpDtlsConn) write(b []byte) (int, func() error) {
 	return 0, c.getErrorHandler(rv, errno)
 }
 
+func UpdateSetUdpDtlsCtxBaseCfg(ctx *Ctx) {
+	C.UpdateUdpDtlsCtxBaseCfg(ctx.ctx)
+}
+
+func UdpDtlsAccept(ctx *Ctx, port uint32) (conn *UdpDtlsConn, err error) {
+	fd := C.new_socket(C.uint(port));
+	if (fd <= 0) {
+		return nil, errors.New("Failed to new_socket.");
+	}
+	ssl := &SSL{}
+	ssl.ssl = C.SSL_new(ctx.ctx)
+	ssl.SetOptions(CookieExchange)
+
+	//BIO_NOCLOSE == 0; BIO_CLOSE == 1;
+	bio := NewBioDgramUdp(ssl, int(fd), 0)
+	C.BioCtrlForUdpDtls(bio.bio, 5)
+
+	raddr := make([]byte, 64)
+	C.UdpDtlsListen(ssl.ssl, fd, (*C.char)(unsafe.Pointer(&raddr[0])))
+
+	conn = &UdpDtlsConn{
+		SSL: ssl,
+		Fd: int(fd),
+		bio: bio,
+		ctx: ctx,
+		conn: &SocketConn{fd: int(fd)},
+		Raddr: string(raddr),
+		into_ssl: &readBio{},
+		from_ssl: &writeBio{},
+	}
+
+	//C.SSL_set_accept_state(conn.ssl)
+	var res int = 0
+	for(res <= 0) {
+		// TODO: optimize
+		res = int(C.SSL_accept(conn.ssl))
+	}
+	C.BioCtrlForUdpDtls(bio.bio, 5)
+	return conn, nil
+}
+
 func UdpDtlstest(cert, key string) (err error) {
 	ctx, err := NewCtxFromFiles(cert, key, DTLSv1_2)
 	if err != nil || ctx == nil {
@@ -502,7 +616,8 @@ func UdpDtlstest(cert, key string) (err error) {
 		bio := NewBioDgramUdp(ssl, int(fd), 0)
 		C.BioCtrlForUdpDtls(bio.bio, 5)
 
-		raddr := C.UdpDtlsListen(ssl.ssl, fd)
+		raddr := make([]byte, 64)
+		C.UdpDtlsListen(ssl.ssl, fd, (*C.char)(unsafe.Pointer(&raddr[0])))
 
 		conn := &UdpDtlsConn{
 			SSL: ssl,
@@ -510,7 +625,7 @@ func UdpDtlstest(cert, key string) (err error) {
 			bio: bio,
 			ctx: ctx,
 			conn: &SocketConn{fd: int(fd)},
-			Raddr: C.GoString(raddr),
+			Raddr: string(raddr),
 			into_ssl: &readBio{},
 			from_ssl: &writeBio{},
 		}
@@ -528,10 +643,10 @@ func UdpDtlstest(cert, key string) (err error) {
 			for {
 				buf := make([]byte, 1000)
 				n, err := conn.Read(buf)
-				if err != nil {
-					fmt.Printf("Failed to conn.Read, Err: %v\n", err)
+				if err != nil || n < 0 {
+					fmt.Printf("Failed to conn.Read, N=%d, Err: %v\n", n, err)
 				} else {
-					fmt.Printf("Receive msg from %s, msg[%d]:%v\n", conn.Raddr, n, buf)
+					fmt.Printf("Receive msg from %s, msg[%d]:%v\n", conn.Raddr, n, buf[:n])
 					_, err = conn.Write([]byte("OK"))
 					if err != nil {
 						fmt.Printf("Failed to conn.Write, Err: %v\n", err)
@@ -542,3 +657,31 @@ func UdpDtlstest(cert, key string) (err error) {
 	}
 }
 
+func NewUdpDtlsClient(ctx *Ctx, lport uint32, raddr string, rport uint32) (conn *UdpDtlsConn, err error) {
+	fd := C.new_socket(C.uint(lport));
+	if (fd <= 0) {
+		return nil, errors.New("Failed to new_socket.")
+	}
+
+	ssl := &SSL{}
+	ssl.ssl = C.SSL_new(ctx.ctx)
+	//BIO_NOCLOSE == 0; BIO_CLOSE == 1;
+	bio := NewBioDgramUdp(ssl, int(fd), 1)
+
+	ret := C.associate_peer_info(ssl.ssl, fd, C.CString(raddr), C.uint(rport))
+	if ret < 0 {
+		return nil, errors.New("Failed to associatePeerInfo.")
+	}
+
+	conn = &UdpDtlsConn{
+		SSL: ssl,
+		Fd: int(fd),
+		bio: bio,
+		ctx: ctx,
+		conn: &SocketConn{fd: int(fd)},
+		Raddr: raddr,
+		into_ssl: &readBio{},
+		from_ssl: &writeBio{},
+	}
+	return conn, nil
+}
