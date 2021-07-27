@@ -394,20 +394,64 @@ func (c *UdpDtlsConn) Read(b []byte) (n int, err error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-
-	rv, _ := C.SSL_read(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
-	if rv <=  0 {
-		return int(rv), errors.New("Failed to SSL_read")
+	err = tryAgain
+	for err == tryAgain {
+		n, errcb := c.read(b)
+		err = c.handleError(errcb)
+		if err == nil {
+			go c.flushOutputBuffer()
+			return n, nil
+		}
+		if err == io.ErrUnexpectedEOF {
+			err = io.EOF
+		}
 	}
-	return int(rv), nil
+	return 0, err
+}
+
+func (c *UdpDtlsConn) read(b []byte) (int, func() error) {
+
+	if c.is_shutdown {
+		return 0, func() error { return io.EOF }
+	}
+	//BioCtrlGetSCTPRcvInfo(c.bio, rcvInfo)
+
+	rv, errno := C.SSL_read(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
+	if rv > 0 {
+		return int(rv), nil
+	}
+
+	return 0, c.getErrorHandler(rv, errno)
 }
 
 func (c *UdpDtlsConn) Write(b []byte) (n int, err error) {
-	rv, _ := C.SSL_write(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
-	if rv <=  0 {
-		return int(rv), errors.New("Failed to SSL_write")
+	if len(b) == 0 {
+		return 0, nil
 	}
-	return int(rv), nil
+	err = tryAgain
+	for err == tryAgain {
+		n, errcb := c.write(b)
+		err = c.handleError(errcb)
+		if err == nil {
+			return n, c.flushOutputBuffer()
+		}
+	}
+	return 0, err
+}
+
+func (c *UdpDtlsConn) write(b []byte) (int, func() error) {
+
+	if c.is_shutdown {
+		err := errors.New("connection closed")
+		return 0, func() error { return err }
+	}
+	//BioCtrlSetSCTPSndInfo(c.bio, sndInfo)
+	rv, errno := C.SSL_write(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
+	if rv > 0 {
+		return int(rv), nil
+	}
+
+	return 0, c.getErrorHandler(rv, errno)
 }
 
 func UdpDtlstest(cert, key string) (err error) {
