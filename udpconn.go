@@ -508,6 +508,7 @@ func UdpDtlstest(cert, key string) (err error) {
 			Fd: int(fd),
 			bio: bio,
 			ctx: ctx,
+			conn: &SocketConn{},
 			Raddr: C.GoString(raddr),
 			into_ssl: &readBio{},
 			from_ssl: &writeBio{},
