@@ -230,6 +230,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"syscall"
 	"unsafe"
 	"github.com/spacemonkeygo/openssl/utils"
 )
@@ -243,14 +244,14 @@ func (c *SocketConn) Close() (err error) {
 }
 
 func (c *SocketConn) Read(p []byte) (n int, err error) {
-	n = len(p)
-	fmt.Printf("conn.Read[%v]", p)
+	n , err = syscall.Read(syscall.Handle(c.fd), p)
+	fmt.Printf("conn.Read[%v], len=%d", p[:n-1], n)
 	return
 }
 
 func (c *SocketConn) Write(p []byte) (n int, err error) {
-	n = len(p)
-	fmt.Printf("conn.Write[%v]", p)
+	n , err = syscall.Write(syscall.Handle(c.fd), p)
+	fmt.Printf("conn.Write[%v], len=%d", p[:n-1], n)
 	return
 }
 
@@ -508,7 +509,7 @@ func UdpDtlstest(cert, key string) (err error) {
 			Fd: int(fd),
 			bio: bio,
 			ctx: ctx,
-			conn: &SocketConn{},
+			conn: &SocketConn{fd: int(fd)},
 			Raddr: C.GoString(raddr),
 			into_ssl: &readBio{},
 			from_ssl: &writeBio{},
@@ -516,7 +517,7 @@ func UdpDtlstest(cert, key string) (err error) {
 
 		go func() {
 			//
-			C.SSL_set_accept_state(conn.ssl)
+			//C.SSL_set_accept_state(conn.ssl)
 			var res int = 0
 			for(res <= 0) {
 				// TODO: optimize
