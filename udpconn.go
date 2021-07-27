@@ -229,11 +229,30 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"sync"
 	"unsafe"
 	"github.com/spacemonkeygo/openssl/utils"
 )
+
+type SocketConn struct {
+	fd   int
+}
+
+func (c *SocketConn) Close() (err error) {
+	return
+}
+
+func (c *SocketConn) Read(p []byte) (n int, err error) {
+	n = len(p)
+	fmt.Printf("conn.Read[%v]", p)
+	return
+}
+
+func (c *SocketConn) Write(p []byte) (n int, err error) {
+	n = len(p)
+	fmt.Printf("conn.Write[%v]", p)
+	return
+}
 
 // UdpDtlsConn .
 type UdpDtlsConn struct {
@@ -241,7 +260,7 @@ type UdpDtlsConn struct {
 	Fd               int
 	Raddr            string
 	bio              *Bio
-	conn             net.Conn
+	conn             *SocketConn
 	ctx              *Ctx // for gc
 	into_ssl         *readBio
 	from_ssl         *writeBio
