@@ -111,6 +111,8 @@ typedef void (*BIO_dgram_sctp_notification_handler_FN) (BIO *b,
                                                         void *buf);
 /*BIO method added as part of DTLS-udp*/
 extern BIO *X_BIO_new_dgram(int fd, int close_flag);
+extern long X_Bio_Ctrl_Dgram_Set_RecvTimout(BIO *bio, int sec);
+extern long X_Bio_Ctrl_Dgram_Set_SendTimout(BIO *bio, int sec);
 
 /* EVP methods */
 extern const int X_ED25519_SUPPORT;

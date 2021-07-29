@@ -7,10 +7,10 @@ package openssl
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
@@ -18,212 +18,187 @@ package openssl
 #include <openssl/rand.h>
 #include <openssl/opensslv.h>
 
-char cookie_str[] = "BISCUIT!";
+#define COOKIE_SECRET_LENGTH 16
+unsigned char cookie_secret[COOKIE_SECRET_LENGTH];
+
+int init_cookie_secret()
+{
+	if (!RAND_bytes(cookie_secret, COOKIE_SECRET_LENGTH)) {
+		return -1;
+	}
+	return 0;
+}
+
+int CalculateCookicBasedOnPeerInfo(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len)
+{
+	unsigned int length = 0, resultlength = 0;
+	unsigned char* buffer = NULL, result[EVP_MAX_MD_SIZE] = {0};
+	union {
+		struct sockaddr_storage ss;
+		struct sockaddr_in6 s6;
+		struct sockaddr_in s4;
+	} peer;
+
+	// Get peer info
+	BIO_dgram_get_peer(SSL_get_rbio(ssl), &peer);
+
+	// Create buffer with peer's address and port
+	switch (peer.ss.ss_family) {
+		case AF_INET:
+			length += sizeof(struct in_addr);
+			break;
+		case AF_INET6:
+			length += sizeof(struct in6_addr);
+			break;
+		default:
+			printf("Unknown ss_family type.\n");
+			return -1;
+	}
+
+	length += sizeof(in_port_t);
+	buffer = (unsigned char*) OPENSSL_malloc(length);
+	if (buffer == NULL) {
+		printf("Failed to OPENSSL_malloc.\n");
+		return -1;
+	}
+
+	switch (peer.ss.ss_family) {
+	case AF_INET:
+		memcpy(buffer, &peer.s4.sin_port, sizeof(in_port_t));
+		memcpy(buffer + sizeof(peer.s4.sin_port), &peer.s4.sin_addr, sizeof(struct in_addr));
+		break;
+	case AF_INET6:
+		memcpy(buffer, &peer.s6.sin6_port, sizeof(in_port_t));
+		memcpy(buffer + sizeof(in_port_t), &peer.s6.sin6_addr, sizeof(struct in6_addr));
+		break;
+	default:
+		printf("Unknown ss_family type.\n");
+		return -1;
+	}
+
+	// Calculate HMAC of buffer using the secret
+	HMAC(EVP_sha256(), (const void*) cookie_secret, COOKIE_SECRET_LENGTH, (const unsigned char*) buffer, length, result, &resultlength);
+	OPENSSL_free(buffer);
+
+	memcpy(cookie, result, resultlength);
+	*cookie_len = resultlength;
+	return 0;
+}
 
 int generate_cookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len)
 {
-    memmove(cookie, cookie_str, sizeof(cookie_str)-1);
-    *cookie_len = sizeof(cookie_str)-1;
+	unsigned int resultlength = 0;
+	unsigned char result[EVP_MAX_MD_SIZE] = {0};
+	int ret = CalculateCookicBasedOnPeerInfo(ssl, result, &resultlength);
+	if (ret < 0) {
+		return 0;
+	}
 
-    return 1;
+	memcpy(cookie, result, resultlength);
+	*cookie_len = resultlength;
+	return 1;
 }
 
 int verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len)
 {
-    return sizeof(cookie_str)-1==cookie_len && memcmp(cookie, cookie_str, sizeof(cookie_str)-1)==0;
+	unsigned int resultlength = 0;
+	unsigned char result[EVP_MAX_MD_SIZE] = {0};
+	int ret = CalculateCookicBasedOnPeerInfo(ssl, result, &resultlength);
+	if (ret < 0) {
+		return 0;
+	}
+	return cookie_len==resultlength && memcmp(result, cookie, resultlength)==0;
 }
 
-int new_socket(unsigned int port) {
-    int sock;
-    const int on = 1, off = 0;
+int new_socket(unsigned int port)
+{
+	int sock;
+	const int on = 1, off = 0;
 
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
+	struct sockaddr_in server_addr;
+	memset(&server_addr, 0, sizeof(server_addr));
 
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_addr.sin_port = htons(port);
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	server_addr.sin_port = htons(port);
 
-    if((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
+	if((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+		perror("socket");
+		return -1;
+	}
 
-    if(setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*) &on, (socklen_t) sizeof(on)) < 0) {
-        perror("set reuse address");
-        exit(EXIT_FAILURE);
-    }
+	if(setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*) &on, (socklen_t) sizeof(on)) < 0) {
+		close(sock);
+		perror("set reuse address");
+		return -2;
+	}
 
-    //if(setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char*) &on, (socklen_t) sizeof(on)) < 0) {
-    //    perror("set reuse port");
-    //    exit(EXIT_FAILURE);
-    //}
+	//if(setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char*) &on, (socklen_t) sizeof(on)) < 0) {
+	//    close(sock);
+	//    perror("set reuse port");
+	//    return -3;
+	//}
 
-    if(bind(sock, (const struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
-        perror("bind");
-        exit(EXIT_FAILURE);
-    }
-    return sock;
+	if(bind(sock, (const struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+		close(sock);
+		perror("bind");
+		return -4;
+	}
+	return sock;
 }
 
-int ConnRead(SSL *ssl) {
-	int n = 0;
-	char buf[2000];
-	n = SSL_read(ssl, buf, sizeof(buf));
-	if(n > 0) {
-		printf("SSL_read -> %d\n", n);
+int read_msg(int fd, void *buf, size_t len)
+{
+	int n = recv(fd, buf, len, 0);
+	if(n < 0) {
+		if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+			return 0;
+		} else {
+			return -1;
+		}
 	}
     return n;
 }
 
-//Clinet
-SSL* client_connect(SSL_CTX *ctx, char *raddr, unsigned int rport, unsigned int lport) {
-	union {
-		struct sockaddr_storage ss;
-		struct sockaddr_in s4;
-		struct sockaddr_in6 s6;
-	} remote_addr;
-
-	if (inet_pton(AF_INET, raddr, &remote_addr.s4.sin_addr) == 1) {
-		remote_addr.s4.sin_family = AF_INET;
-		//remote_addr.s4.sin_len = sizeof(struct sockaddr_in);
-		remote_addr.s4.sin_port = htons(rport);
-	} else if (inet_pton(AF_INET6, raddr, &remote_addr.s6.sin6_addr) == 1) {
-		remote_addr.s6.sin6_family = AF_INET6;
-		//remote_addr.s6.sin6_len = sizeof(struct sockaddr_in6);
-		remote_addr.s6.sin6_port = htons(rport);
-	} else {
-		return NULL;
-	}
-
-    int fd = new_socket(lport);
-    if (fd <= 0) {
-        return NULL;
-    }
-
-    SSL *ssl = SSL_new(ctx);
-
-    // Create BIO, connect and set to already connected
-	BIO *bio = BIO_new_dgram(fd, BIO_CLOSE);
-	if (remote_addr.ss.ss_family == AF_INET) {
-		if (connect(fd, (struct sockaddr *) &remote_addr, sizeof(struct sockaddr_in))) {
-             return NULL;
-		}
-	} else {
-		if (connect(fd, (struct sockaddr *) &remote_addr, sizeof(struct sockaddr_in6))) {
-             return NULL;
-		}
-	}
-    BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &remote_addr.ss);
-    SSL_set_bio(ssl, bio, bio);
-
-    int retval = SSL_connect(ssl);
-	if (retval <= 0) {
-		switch (SSL_get_error(ssl, retval)) {
-			case SSL_ERROR_ZERO_RETURN:
-				printf("SSL_connect failed with SSL_ERROR_ZERO_RETURN\n");
-				break;
-			case SSL_ERROR_WANT_READ:
-				printf("SSL_connect failed with SSL_ERROR_WANT_READ\n");
-				break;
-			case SSL_ERROR_WANT_WRITE:
-				printf("SSL_connect failed with SSL_ERROR_WANT_WRITE\n");
-				break;
-			case SSL_ERROR_WANT_CONNECT:
-				printf("SSL_connect failed with SSL_ERROR_WANT_CONNECT\n");
-				break;
-			case SSL_ERROR_WANT_ACCEPT:
-				printf("SSL_connect failed with SSL_ERROR_WANT_ACCEPT\n");
-				break;
-			case SSL_ERROR_WANT_X509_LOOKUP:
-				printf("SSL_connect failed with SSL_ERROR_WANT_X509_LOOKUP\n");
-				break;
-			case SSL_ERROR_SYSCALL:
-				printf("SSL_connect failed with SSL_ERROR_SYSCALL\n");
-				break;
-			case SSL_ERROR_SSL:
-				printf("SSL_connect failed with SSL_ERROR_SSL\n");
-				break;
-			default:
-				printf("SSL_connect failed with unknown error\n");
-				break;
-		}
-		return NULL;
-    }
-
-    // Set and activate timeouts
-    struct timeval timeout;
-    timeout.tv_sec = 3;
-    timeout.tv_usec = 0;
-    BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
-
-    // Debug
-	if (1) {
-	    char addrbuf[INET6_ADDRSTRLEN];
-		if (remote_addr.ss.ss_family == AF_INET) {
-			printf ("Connected to %s\n",
-					 inet_ntop(AF_INET, &remote_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN));
-		} else {
-			printf ("Connected to %s\n",
-					 inet_ntop(AF_INET6, &remote_addr.s6.sin6_addr, addrbuf, INET6_ADDRSTRLEN));
-		}
-	}
-
-	char buf[64] = "Hello, World!";
-	SSL_write(ssl, buf, sizeof(buf));
-    return ssl;
+int UpdateUdpDtlsCtxBaseCfg(SSL_CTX *ctx)
+{
+	SSL_CTX_set_min_proto_version(ctx, DTLS1_2_VERSION);
+	SSL_CTX_set_cookie_generate_cb(ctx, generate_cookie);
+	SSL_CTX_set_cookie_verify_cb(ctx, &verify_cookie);
 }
 
-int client(SSL_CTX *ctx) {
-    SSL *ssl = client_connect(ctx, "127.0.0.1", 4444, 12345);
-    if (ssl == NULL) {
-         return -1;
-    }
-    return 0;
-}
-
-int UpdateUdpDtlsCtxBaseCfg(SSL_CTX *ctx) {
-    SSL_CTX_set_min_proto_version(ctx, DTLS1_2_VERSION);
-    SSL_CTX_set_cookie_generate_cb(ctx, generate_cookie);
-    SSL_CTX_set_cookie_verify_cb(ctx, &verify_cookie);
-}
-
-void BioCtrlForUdpDtls(BIO *bio, int recv_timeout) {
-    struct timeval timeout;
-    timeout.tv_sec = recv_timeout;
-    timeout.tv_usec = 0;
-    BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
-}
-
-int UdpDtlsListen(SSL *ssl, int fd, char *raddr) {
+int UdpDtlsListen(SSL *ssl, int fd, char *raddr)
+{
 	union {
 		struct sockaddr_storage ss;
 		struct sockaddr_in6 s6;
 		struct sockaddr_in s4;
 	} client_addr;
-    memset(&client_addr, 0, sizeof(struct sockaddr_storage));
+	memset(&client_addr, 0, sizeof(struct sockaddr_storage));
 
-    while (DTLSv1_listen(ssl, (BIO_ADDR *) &client_addr) <= 0);
+	while (DTLSv1_listen(ssl, (BIO_ADDR *) &client_addr) <= 0);
 
-    //Get Peer addr: ip:port
-    char addrbuf[INET6_ADDRSTRLEN];
-    sprintf(raddr, "%s:%d", inet_ntop(AF_INET, &client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN), ntohs(client_addr.s4.sin_port));
-    // DEBUG
-    if (1) {
-        printf ("accepted connection from %s\n", raddr);
-    }
+	//Get Peer addr: ip:port
+	char addrbuf[INET6_ADDRSTRLEN];
+	sprintf(raddr, "%s:%d", inet_ntop(AF_INET, &client_addr.s4.sin_addr, addrbuf, INET6_ADDRSTRLEN), ntohs(client_addr.s4.sin_port));
+
+	// DEBUG
+	if (1) {
+		printf ("accepted connection from %s\n", raddr);
+	}
 
 	if (connect(fd, (struct sockaddr *) &client_addr, sizeof(struct sockaddr_in))) {
 		printf("Failed to connect.");
 		return -1;
 	}
 
-    //BIO_set_fd(SSL_get_rbio(ssl), info.fd, BIO_NOCLOSE);
-    BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &client_addr.ss);
-    return 0;
+	//BIO_set_fd(SSL_get_rbio(ssl), info.fd, BIO_NOCLOSE);
+	BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &client_addr.ss);
+	return 0;
 }
 
-int associate_peer_info(SSL *ssl, int fd, char *raddr, unsigned int rport) {
+int associate_peer_info(SSL *ssl, int fd, char *raddr, unsigned int rport)
+{
 	union {
 		struct sockaddr_storage ss;
 		struct sockaddr_in s4;
@@ -242,7 +217,7 @@ int associate_peer_info(SSL *ssl, int fd, char *raddr, unsigned int rport) {
 		return -1;
 	}
 
-    //bind peer ip:port
+	//bind peer ip:port
 	if (remote_addr.ss.ss_family == AF_INET) {
 		if (connect(fd, (struct sockaddr *) &remote_addr, sizeof(struct sockaddr_in))) {
             printf("Failed to connect.");
@@ -250,88 +225,71 @@ int associate_peer_info(SSL *ssl, int fd, char *raddr, unsigned int rport) {
 		}
 	} else {
 		if (connect(fd, (struct sockaddr *) &remote_addr, sizeof(struct sockaddr_in6))) {
-            printf("Failed to connect.");
-		    return -3;
+			printf("Failed to connect.");
+			return -3;
 		}
 	}
-    BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &remote_addr.ss);
-
-    int retval = SSL_connect(ssl);
-	if (retval <= 0) {
-		switch (SSL_get_error(ssl, retval)) {
-			case SSL_ERROR_ZERO_RETURN:
-				printf("SSL_connect failed with SSL_ERROR_ZERO_RETURN\n");
-				break;
-			case SSL_ERROR_WANT_READ:
-				printf("SSL_connect failed with SSL_ERROR_WANT_READ\n");
-				break;
-			case SSL_ERROR_WANT_WRITE:
-				printf("SSL_connect failed with SSL_ERROR_WANT_WRITE\n");
-				break;
-			case SSL_ERROR_WANT_CONNECT:
-				printf("SSL_connect failed with SSL_ERROR_WANT_CONNECT\n");
-				break;
-			case SSL_ERROR_WANT_ACCEPT:
-				printf("SSL_connect failed with SSL_ERROR_WANT_ACCEPT\n");
-				break;
-			case SSL_ERROR_WANT_X509_LOOKUP:
-				printf("SSL_connect failed with SSL_ERROR_WANT_X509_LOOKUP\n");
-				break;
-			case SSL_ERROR_SYSCALL:
-				printf("SSL_connect failed with SSL_ERROR_SYSCALL\n");
-				break;
-			case SSL_ERROR_SSL:
-				printf("SSL_connect failed with SSL_ERROR_SSL\n");
-				break;
-			default:
-				printf("SSL_connect failed with unknown error\n");
-				break;
-		}
-		return -4;
-    }
-
-    // Set and activate timeouts
-    struct timeval timeout;
-    timeout.tv_sec = 3;
-    timeout.tv_usec = 0;
-    BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
-
-    return 0;
+	BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &remote_addr.ss);
+	return 0;
 }
  */
 import "C"
 import (
 	"errors"
 	"fmt"
-	"io"
-	"sync"
-	"syscall"
-	"unsafe"
 	"github.com/spacemonkeygo/openssl/utils"
+	"io"
+	"log"
+	"strings"
+	"sync"
+	"unsafe"
 )
+
+func InitUdpDtlsLib() (err error) {
+	// Init openssl lib
+	Init()
+
+	// Init Cookie Secret
+	if (C.init_cookie_secret() < 0) {
+		err = errors.New("error setting random cookie secret")
+		return
+	}
+	return
+}
 
 type SocketConn struct {
 	fd   int
 }
 
 func (c *SocketConn) Close() (err error) {
-	err = syscall.Close(c.fd)
+	if (C.close(C.int(c.fd)) < 0) {
+		err = errors.New(fmt.Sprintf("failed to close(%d)", c.fd))
+	}
 	return
 }
 
 func (c *SocketConn) Read(p []byte) (n int, err error) {
-	//n , err = syscall.Read(c.fd, p)
-	//if err != nil {
-	//	err = errors.New(fmt.Sprintf("Failed ot syscall.Read, Err: %v", err))
-	//	return
-	//}
+	rv := C.read_msg(C.int(c.fd), C.CBytes(p), C.ulong(len(p)))
+	if rv == 0 {
+		n = -1
+		//err = errors.New("resource temporarily unavailable")
+	} else if rv < 0 {
+		n = -2
+		err = errors.New(fmt.Sprintf("failed ot C.recv, fd=%d, ret=%d", c.fd, n))
+	} else {
+		n = int(rv)
+	}
+	/*n = int(C.recv(C.int(c.fd), C.CBytes(p), C.ulong(len(p)), 0))
+	if n < 0 {
+		err = errors.New(fmt.Sprintf("Failed ot C.recv, fd=%d, ret=%d", c.fd, n)
+	}*/
 	return
 }
 
 func (c *SocketConn) Write(p []byte) (n int, err error) {
-	n , err = syscall.Write(c.fd, p)
-	if err != nil {
-		err = errors.New(fmt.Sprintf("Failed ot syscall.Write, Err: %v", err))
+	n = int(C.send(C.int(c.fd), C.CBytes(p), C.ulong(len(p)), 0))
+	if n < 0 {
+		err = errors.New(fmt.Sprintf("Failed ot C.send, fd=%d, ret=%d", c.fd, n))
 		return
 	}
 	return
@@ -352,7 +310,7 @@ type UdpDtlsConn struct {
 	want_read_future *utils.Future
 }
 
-func (c *UdpDtlsConn) fillInputBuffer() error {
+func (c *UdpDtlsConn) fillInputBuffer() (err error) {
 	for {
 		n, err := c.into_ssl.ReadFromOnce(c.conn)
 		if n == 0 && err == nil {
@@ -364,15 +322,40 @@ func (c *UdpDtlsConn) fillInputBuffer() error {
 		}
 		return err
 	}
+	return
 }
 
-func (c *UdpDtlsConn) flushOutputBuffer() error {
-	_, err := c.from_ssl.WriteTo(c.conn)
+func (c *UdpDtlsConn) flushOutputBuffer() (err error) {
+	_, err = c.from_ssl.WriteTo(c.conn)
 	return err
+}
+
+func (c *UdpDtlsConn) getError(rv C.int) (err error) {
+	switch (C.SSL_get_error(c.ssl, rv)) {
+	case C.SSL_ERROR_ZERO_RETURN:
+		return errors.New("SSL_connect failed with SSL_ERROR_ZERO_RETURN\n")
+	case C.SSL_ERROR_WANT_READ:
+		return errors.New("SSL_connect failed with SSL_ERROR_WANT_READ\n")
+	case C.SSL_ERROR_WANT_WRITE:
+		return errors.New("SSL_connect failed with SSL_ERROR_WANT_WRITE\n")
+	case C.SSL_ERROR_WANT_CONNECT:
+		return errors.New("SSL_connect failed with SSL_ERROR_WANT_CONNECT\n")
+	case C.SSL_ERROR_WANT_ACCEPT:
+		return errors.New("SSL_connect failed with SSL_ERROR_WANT_ACCEPT\n")
+	case C.SSL_ERROR_WANT_X509_LOOKUP:
+		return errors.New("SSL_connect failed with SSL_ERROR_WANT_X509_LOOKUP\n")
+	case C.SSL_ERROR_SYSCALL:
+		return errors.New("SSL_connect failed with SSL_ERROR_SYSCALL\n")
+	case C.SSL_ERROR_SSL:
+		return errors.New("SSL_connect failed with SSL_ERROR_SSL\n")
+	default:
+		return errors.New("SSL_connect failed with unknown error\n")
+	}
 }
 
 func (c *UdpDtlsConn) getErrorHandler(rv C.int, errno error) func() error {
 	errcode := C.SSL_get_error(c.ssl, rv)
+	log.Printf("SSL_get_error = %d, err = %v\n", errcode, errno)
 	switch errcode {
 	case C.SSL_ERROR_ZERO_RETURN:
 		return func() error {
@@ -467,12 +450,13 @@ func (c *UdpDtlsConn) shutdownLoop() error {
 
 // Close dtls conn
 func (c *UdpDtlsConn) Close() error {
-
-	c.conn.Close()
-	c.is_shutdown = true
 	var errs utils.ErrorGroup
-	errs.Add(c.shutdownLoop())
-	errs.Add(c.conn.Close())
+	if(!c.is_shutdown) {
+		c.is_shutdown = true
+		errs.Add(c.shutdownLoop())
+		//C.SSL_free(c.ssl);
+		errs.Add(c.conn.Close())
+	}
 	return errs.Finalize()
 }
 
@@ -480,12 +464,6 @@ func (c *UdpDtlsConn) Read(b []byte) (n int, err error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	rv, _ := C.SSL_read(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
-	if rv > 0 {
-		return int(rv), nil
-	}
-	return 0, errors.New("Failed to SSL_read.")
-	/*
 	err = tryAgain
 	for err == tryAgain {
 		n, errcb := c.read(b)
@@ -499,7 +477,6 @@ func (c *UdpDtlsConn) Read(b []byte) (n int, err error) {
 		}
 	}
 	return 0, err
-	*/
 }
 
 func (c *UdpDtlsConn) read(b []byte) (int, func() error) {
@@ -551,21 +528,27 @@ func UpdateSetUdpDtlsCtxBaseCfg(ctx *Ctx) {
 	C.UpdateUdpDtlsCtxBaseCfg(ctx.ctx)
 }
 
-func UdpDtlsAccept(ctx *Ctx, port uint32) (conn *UdpDtlsConn, err error) {
+func UdpDtlsAccept(ctx *Ctx, port int) (conn *UdpDtlsConn, err error) {
 	fd := C.new_socket(C.uint(port));
 	if (fd <= 0) {
-		return nil, errors.New("Failed to new_socket.");
+		return nil, errors.New("Failed to new_socket")
 	}
+
 	ssl := &SSL{}
 	ssl.ssl = C.SSL_new(ctx.ctx)
 	ssl.SetOptions(CookieExchange)
 
 	//BIO_NOCLOSE == 0; BIO_CLOSE == 1;
 	bio := NewBioDgramUdp(ssl, int(fd), 0)
-	C.BioCtrlForUdpDtls(bio.bio, 5)
 
-	raddr := make([]byte, 64)
-	C.UdpDtlsListen(ssl.ssl, fd, (*C.char)(unsafe.Pointer(&raddr[0])))
+	raddr := make([]byte, 128)
+	ret := C.UdpDtlsListen(ssl.ssl, fd, (*C.char)(unsafe.Pointer(&raddr[0])))
+	if (ret < 0) {
+		C.SSL_free(ssl.ssl)
+		C.close(fd)
+		return nil, errors.New("Failed to UdpDtlsListen.");
+	}
+	raddrLen := strings.IndexByte(string(raddr[:]), byte(0))
 
 	conn = &UdpDtlsConn{
 		SSL: ssl,
@@ -573,88 +556,22 @@ func UdpDtlsAccept(ctx *Ctx, port uint32) (conn *UdpDtlsConn, err error) {
 		bio: bio,
 		ctx: ctx,
 		conn: &SocketConn{fd: int(fd)},
-		Raddr: string(raddr),
+		Raddr: string(raddr[:raddrLen]),
 		into_ssl: &readBio{},
 		from_ssl: &writeBio{},
 	}
 
 	//C.SSL_set_accept_state(conn.ssl)
-	var res int = 0
-	for(res <= 0) {
-		// TODO: optimize
-		res = int(C.SSL_accept(conn.ssl))
+	ret = C.SSL_accept(conn.ssl)
+	if ret < 0 {
+		C.SSL_free(ssl.ssl)
+		C.close(fd)
+		return nil, conn.getError(ret)
 	}
-	C.BioCtrlForUdpDtls(bio.bio, 5)
+
+	// Set Recv Timeout
+	//BIOCtrlDgramSetRecvTimeout(bio, 5)
 	return conn, nil
-}
-
-func UdpDtlstest(cert, key string) (err error) {
-	ctx, err := NewCtxFromFiles(cert, key, DTLSv1_2)
-	if err != nil || ctx == nil {
-		err = fmt.Errorf("cannot create context from cert files %s and %s; err: %v", cert, key, err)
-		return
-	}
-
-	C.UpdateUdpDtlsCtxBaseCfg(ctx.ctx)
-	//ctx.SetVerify(VerifyPeer|VerifyFailIfNoPeerCert, nil)
-	ctx.SetVerify(VerifyNone, nil)
-	ctx.SetReadAhead(1)
-
-	//Todo: tbd
-	//ctx.SetCipherList()
-
-	for {
-		fd := C.new_socket(4444);
-		if (fd <= 0) {
-			return errors.New("Failed to new_socket.");
-		}
-		ssl := &SSL{}
-		ssl.ssl = C.SSL_new(ctx.ctx)
-		ssl.SetOptions(CookieExchange)
-
-		//BIO_NOCLOSE == 0; BIO_CLOSE == 1;
-		bio := NewBioDgramUdp(ssl, int(fd), 0)
-		C.BioCtrlForUdpDtls(bio.bio, 5)
-
-		raddr := make([]byte, 64)
-		C.UdpDtlsListen(ssl.ssl, fd, (*C.char)(unsafe.Pointer(&raddr[0])))
-
-		conn := &UdpDtlsConn{
-			SSL: ssl,
-			Fd: int(fd),
-			bio: bio,
-			ctx: ctx,
-			conn: &SocketConn{fd: int(fd)},
-			Raddr: string(raddr),
-			into_ssl: &readBio{},
-			from_ssl: &writeBio{},
-		}
-
-		go func() {
-			//
-			//C.SSL_set_accept_state(conn.ssl)
-			var res int = 0
-			for(res <= 0) {
-				// TODO: optimize
-				res = int(C.SSL_accept(conn.ssl))
-			}
-			C.BioCtrlForUdpDtls(bio.bio, 5)
-
-			for {
-				buf := make([]byte, 1000)
-				n, err := conn.Read(buf)
-				if err != nil || n < 0 {
-					fmt.Printf("Failed to conn.Read, N=%d, Err: %v\n", n, err)
-				} else {
-					fmt.Printf("Receive msg from %s, msg[%d]:%v\n", conn.Raddr, n, buf[:n])
-					_, err = conn.Write([]byte("OK"))
-					if err != nil {
-						fmt.Printf("Failed to conn.Write, Err: %v\n", err)
-					}
-				}
-			}
-		}()
-	}
 }
 
 func NewUdpDtlsClient(ctx *Ctx, lport uint32, raddr string, rport uint32) (conn *UdpDtlsConn, err error) {
@@ -670,6 +587,8 @@ func NewUdpDtlsClient(ctx *Ctx, lport uint32, raddr string, rport uint32) (conn 
 
 	ret := C.associate_peer_info(ssl.ssl, fd, C.CString(raddr), C.uint(rport))
 	if ret < 0 {
+		C.SSL_free(ssl.ssl)
+		C.close(fd)
 		return nil, errors.New("Failed to associatePeerInfo.")
 	}
 
@@ -679,9 +598,19 @@ func NewUdpDtlsClient(ctx *Ctx, lport uint32, raddr string, rport uint32) (conn 
 		bio: bio,
 		ctx: ctx,
 		conn: &SocketConn{fd: int(fd)},
-		Raddr: raddr,
+		Raddr: fmt.Sprintf("%s:%d", raddr, rport),
 		into_ssl: &readBio{},
 		from_ssl: &writeBio{},
 	}
+
+	ret = C.SSL_connect(conn.ssl)
+	if ret < 0 {
+		C.SSL_free(ssl.ssl)
+		C.close(fd)
+		return nil, conn.getError(ret)
+	}
+
+	// Set Recv Timeout
+	//BIOCtrlDgramSetRecvTimeout(bio, 5)
 	return conn, nil
 }

@@ -392,6 +392,10 @@ func NewBioDgramUdp(ssl *SSL, fd int, closeFlag int) (b *Bio) {
 	return
 }
 
-//func BioCtrlDgramSetRecvTimeout(b *Bio, rcvinfo *BioDgramSctpRcvinfo){
-//	C.BIO_ctrl(b.bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, C.long((unsafe.Sizeof(BioDgramSctpRcvinfo{}))), unsafe.Pointer(rcvinfo));
-//}
+func BIOCtrlDgramSetRecvTimeout(b *Bio, sec int) int {
+	return int(C.X_Bio_Ctrl_Dgram_Set_RecvTimout(b.bio, C.int(sec)))
+}
+
+func BIOCtrlDgramSetSendTimeout(b *Bio, sec int) int {
+	return int(C.X_Bio_Ctrl_Dgram_Set_SendTimout(b.bio, C.int(sec)))
+}

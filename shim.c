@@ -26,6 +26,8 @@
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 
+#include <sys/time.h>
+
 #include "_cgo_export.h"
 
 /*
@@ -800,4 +802,18 @@ int X_BIO_dgram_sctp_notification_cb(BIO *bio,SSL *ssl, void (*handle_notificati
 
 BIO *X_BIO_new_dgram(int fd, int close_flag) {
     return BIO_new_dgram(fd, close_flag);
+}
+
+long X_Bio_Ctrl_Dgram_Set_RecvTimout(BIO *bio, int sec) {
+    struct timeval timeout;
+    timeout.tv_sec = sec;
+    timeout.tv_usec = 0;
+    return BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
+}
+
+long X_Bio_Ctrl_Dgram_Set_SendTimout(BIO *bio, int sec) {
+    struct timeval timeout;
+    timeout.tv_sec = sec;
+    timeout.tv_usec = 0;
+    return BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_SEND_TIMEOUT, 0, &timeout);
 }
