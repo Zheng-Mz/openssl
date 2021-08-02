@@ -817,3 +817,11 @@ long X_Bio_Ctrl_Dgram_Set_SendTimout(BIO *bio, int sec) {
     timeout.tv_usec = 0;
     return BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_SEND_TIMEOUT, 0, &timeout);
 }
+
+void X_SSL_CTX_set_quiet_shutdown(SSL_CTX *ssl_ctx, int yes) {
+    SSL_CTX_set_quiet_shutdown(ssl_ctx, yes);
+}
+
+int X_SSL_CTX_set_min_proto_version(SSL_CTX *ssl_ctx, int version) {
+    return SSL_CTX_set_min_proto_version(ssl_ctx, version);
+}

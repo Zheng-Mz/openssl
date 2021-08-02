@@ -6,8 +6,6 @@ package openssl
 
 #include <stdio.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <string.h>
 #include <unistd.h>
@@ -110,43 +108,6 @@ int verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len
 	return cookie_len==resultlength && memcmp(result, cookie, resultlength)==0;
 }
 
-int new_socket(unsigned int port)
-{
-	int sock;
-	const int on = 1, off = 0;
-
-	struct sockaddr_in server_addr;
-	memset(&server_addr, 0, sizeof(server_addr));
-
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	server_addr.sin_port = htons(port);
-
-	if((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-		perror("socket");
-		return -1;
-	}
-
-	if(setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*) &on, (socklen_t) sizeof(on)) < 0) {
-		close(sock);
-		perror("set reuse address");
-		return -2;
-	}
-
-	//if(setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char*) &on, (socklen_t) sizeof(on)) < 0) {
-	//    close(sock);
-	//    perror("set reuse port");
-	//    return -3;
-	//}
-
-	if(bind(sock, (const struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
-		close(sock);
-		perror("bind");
-		return -4;
-	}
-	return sock;
-}
-
 int new_dgram_socket(int domain, int port)
 {
 	union {
@@ -193,9 +154,8 @@ int read_msg(int fd, void *buf, size_t len)
     return n;
 }
 
-int UpdateUdpDtlsCtxBaseCfg(SSL_CTX *ctx)
+void UDP_DTLS_SSL_CTX_set_cookie_cb(SSL_CTX *ctx)
 {
-	SSL_CTX_set_min_proto_version(ctx, DTLS1_2_VERSION);
 	SSL_CTX_set_cookie_generate_cb(ctx, generate_cookie);
 	SSL_CTX_set_cookie_verify_cb(ctx, &verify_cookie);
 }
@@ -217,7 +177,7 @@ int UdpDtlsListen(SSL *ssl, int fd, char *raddr)
 
 	// DEBUG
 	if (1) {
-		printf ("accepted connection from %s\n", raddr);
+		printf("accepted connection from %s\n", raddr);
 	}
 
 	if (!BIO_connect(fd, (BIO_ADDR *) &client_addr, 0)) {
@@ -263,6 +223,11 @@ import (
 	"strings"
 	"sync"
 	"unsafe"
+)
+
+const (
+	DTLS1_VERSION   = C.DTLS1_VERSION
+	DTLS1_2_VERSION = C.DTLS1_2_VERSION
 )
 
 func InitUdpDtlsLib() (err error) {
@@ -325,6 +290,7 @@ type UdpDtlsConn struct {
 	ctx              *Ctx // for gc
 	into_ssl         *readBio
 	from_ssl         *writeBio
+	is_close         bool
 	is_shutdown      bool
 	mtx              sync.Mutex
 	want_read_future *utils.Future
@@ -342,7 +308,6 @@ func (c *UdpDtlsConn) fillInputBuffer() (err error) {
 		}
 		return err
 	}
-	return
 }
 
 func (c *UdpDtlsConn) flushOutputBuffer() (err error) {
@@ -468,22 +433,33 @@ func (c *UdpDtlsConn) shutdownLoop() error {
 	return err
 }
 
-func (c *UdpDtlsConn) DoSslShutdown() {
-	C.SSL_shutdown(c.ssl)
+func (c *UdpDtlsConn) DoSslShutdown() error {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	if !c.is_shutdown {
+		c.is_shutdown = true
+		return c.shutdownLoop()
+	}
+	return nil
 }
 
 // Close dtls conn
 func (c *UdpDtlsConn) Close() error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
+
+	if c.is_close {
+		return nil
+	}
+	c.is_close = true
+
 	var errs utils.ErrorGroup
-	if(!c.is_shutdown) {
+	if !c.is_shutdown {
 		c.is_shutdown = true
 		errs.Add(c.shutdownLoop())
-		C.SSL_set_shutdown(c.ssl, C.SSL_SENT_SHUTDOWN | C.SSL_RECEIVED_SHUTDOWN)
-		C.SSL_free(c.ssl)
-		errs.Add(c.conn.Close())
 	}
+	C.SSL_free(c.ssl)
+	errs.Add(c.conn.Close())
 	return errs.Finalize()
 }
 
@@ -507,11 +483,13 @@ func (c *UdpDtlsConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *UdpDtlsConn) read(b []byte) (int, func() error) {
-
-	if c.is_shutdown {
+	// 1. In order to complete the bidirectional shutdown handshake, the peer needs to send back a close_notify alert.
+	//    The SSL_RECEIVED_SHUTDOWN flag will be set after receiving and processing it.
+	// 2. Quiet shutdown: ssl_shutdown() will not send close_notify, but will set
+	//    SSL_SENT_SHUTDOWN|SSL_RECEIVED_SHUTDOWN flag.
+	if (C.SSL_get_shutdown(c.ssl)&C.SSL_RECEIVED_SHUTDOWN) != 0 {
 		return 0, func() error { return io.EOF }
 	}
-	//BioCtrlGetSCTPRcvInfo(c.bio, rcvInfo)
 
 	rv, errno := C.SSL_read(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
 	if rv > 0 {
@@ -537,12 +515,15 @@ func (c *UdpDtlsConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *UdpDtlsConn) write(b []byte) (int, func() error) {
-
-	if c.is_shutdown {
+	// 1. SSL_shutdown() tries to send the close_notify shutdown alert to the peer.
+	//    Whether the operation succeeds or not, the SSL_SENT_SHUTDOWN flag is set.
+	// 2. Quiet shutdown: ssl_shutdown() will not send close_notify, but will set
+	//    SSL_SENT_SHUTDOWN|SSL_RECEIVED_SHUTDOWN flag.
+	if (C.SSL_get_shutdown(c.ssl)&C.SSL_SENT_SHUTDOWN) != 0 {
 		err := errors.New("connection closed")
 		return 0, func() error { return err }
 	}
-	//BioCtrlSetSCTPSndInfo(c.bio, sndInfo)
+
 	rv, errno := C.SSL_write(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
 	if rv > 0 {
 		return int(rv), nil
@@ -551,8 +532,8 @@ func (c *UdpDtlsConn) write(b []byte) (int, func() error) {
 	return 0, c.getErrorHandler(rv, errno)
 }
 
-func UpdateSetUdpDtlsCtxBaseCfg(ctx *Ctx) {
-	C.UpdateUdpDtlsCtxBaseCfg(ctx.ctx)
+func UdpDtlsCtxSetCookieCb(ctx *Ctx) {
+	C.UDP_DTLS_SSL_CTX_set_cookie_cb(ctx.ctx)
 }
 
 func UdpDtlsAccept(ctx *Ctx, domain, port int) (conn *UdpDtlsConn, err error) {
@@ -560,14 +541,16 @@ func UdpDtlsAccept(ctx *Ctx, domain, port int) (conn *UdpDtlsConn, err error) {
 	if (fd <= 0) {
 		return nil, errors.New("Failed to new_dgram_socket")
 	}
+
 	ssl := &SSL{}
-	//ssl.ssl = C.SSL_new(ctx.ctx)
 	ssl.ssl, err = newSSL(ctx.ctx)
 	if err != nil || C.SSL_clear(ssl.ssl) == 0 {
-		C.BIO_closesocket(fd)
 		if err == nil {
+			C.SSL_set_shutdown(ssl.ssl, C.SSL_SENT_SHUTDOWN | C.SSL_RECEIVED_SHUTDOWN)
+			C.SSL_free(ssl.ssl)
 			err = errors.New("Failed to clearing SSL connection.")
 		}
+		C.BIO_closesocket(fd)
 		return nil, err
 	}
 
@@ -576,8 +559,11 @@ func UdpDtlsAccept(ctx *Ctx, domain, port int) (conn *UdpDtlsConn, err error) {
 	C.SSL_set_accept_state(ssl.ssl)
 
 	// Set recv/send timeout.
-	//BIOCtrlDgramSetRecvTimeout(bio, 5)
-	//BIOCtrlDgramSetSendTimeout(bio, 5)
+	if C.SSL_get_quiet_shutdown(ssl.ssl) > 0 {
+		// Quiet shutdown: ssl_shutdown() will not send close_notify, but will set SSL_SENT_SHUTDOWN|SSL_RECEIVED_SHUTDOWN flag.
+		BIOCtrlDgramSetRecvTimeout(bio, 5)
+		BIOCtrlDgramSetSendTimeout(bio, 5)
+	}
 
 	// Turn on cookie exchange.
 	ssl.SetOptions(CookieExchange)
@@ -620,9 +606,19 @@ func NewUdpDtlsClient(ctx *Ctx, domain, lport int, raddr string, rport int) (con
 	}
 
 	ssl := &SSL{}
-	ssl.ssl = C.SSL_new(ctx.ctx)
+	ssl.ssl, err = newSSL(ctx.ctx)
+	if err != nil || C.SSL_clear(ssl.ssl) == 0 {
+		if err == nil {
+			C.SSL_set_shutdown(ssl.ssl, C.SSL_SENT_SHUTDOWN | C.SSL_RECEIVED_SHUTDOWN)
+			C.SSL_free(ssl.ssl)
+			err = errors.New("Failed to clearing SSL connection.")
+		}
+		C.BIO_closesocket(fd)
+		return nil, err
+	}
+
 	//BIO_NOCLOSE == 0; BIO_CLOSE == 1;
-	bio := NewBioDgramUdp(ssl, int(fd), 1)
+	bio := NewBioDgramUdp(ssl, int(fd), 0)
 	C.SSL_set_connect_state(ssl.ssl)
 
 	ret := C.associate_peer_info(ssl.ssl, fd, C.CString(raddr), C.uint(rport))
@@ -634,8 +630,11 @@ func NewUdpDtlsClient(ctx *Ctx, domain, lport int, raddr string, rport int) (con
 	}
 
 	// Set recv/send timeout.
-	//BIOCtrlDgramSetRecvTimeout(bio, 5)
-	//BIOCtrlDgramSetSendTimeout(bio, 5)
+	if C.SSL_get_quiet_shutdown(ssl.ssl) > 0 {
+		// Quiet shutdown: ssl_shutdown() will not send close_notify, but will set SSL_SENT_SHUTDOWN|SSL_RECEIVED_SHUTDOWN flag.
+		BIOCtrlDgramSetRecvTimeout(bio, 5)
+		BIOCtrlDgramSetSendTimeout(bio, 5)
+	}
 
 	conn = &UdpDtlsConn{
 		SSL: ssl,

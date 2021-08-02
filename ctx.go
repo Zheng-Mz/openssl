@@ -576,3 +576,14 @@ func (c *Ctx) SessSetCacheSize(t int) int {
 func (c *Ctx) SessGetCacheSize() int {
 	return int(C.X_SSL_CTX_sess_get_cache_size(c.ctx))
 }
+
+/**********************************************/
+/* Methods Added as part of DTLS-UDP support */
+/**********************************************/
+func (c *Ctx) SetQuietShutdown(flag int) {
+	C.X_SSL_CTX_set_quiet_shutdown(c.ctx, C.int(flag))
+}
+
+func (c *Ctx) SetMinProtoVersion(version int) int {
+	return int(C.X_SSL_CTX_set_min_proto_version(c.ctx, C.int(version)))
+}

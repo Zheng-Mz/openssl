@@ -113,6 +113,8 @@ typedef void (*BIO_dgram_sctp_notification_handler_FN) (BIO *b,
 extern BIO *X_BIO_new_dgram(int fd, int close_flag);
 extern long X_Bio_Ctrl_Dgram_Set_RecvTimout(BIO *bio, int sec);
 extern long X_Bio_Ctrl_Dgram_Set_SendTimout(BIO *bio, int sec);
+extern void X_SSL_CTX_set_quiet_shutdown(SSL_CTX *ssl_ctx, int yes);
+extern int X_SSL_CTX_set_min_proto_version(SSL_CTX *ssl_ctx, int version);
 
 /* EVP methods */
 extern const int X_ED25519_SUPPORT;
